@@ -1,0 +1,7 @@
+import { Module } from '@nestjs/common';
+import { PayrollService } from './payroll.service';
+
+@Module({
+  providers: [PayrollService]
+})
+export class PayrollModule {}

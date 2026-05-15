@@ -1,0 +1,195 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+}
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  ruc       String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  users     User[]
+  auditLogs AuthAuditLog[]
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  USER
+  MANAGER
+  ACCOUNTANT
+  VIEWER
+  CUSTOM
+}
+
+model User {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id])
+  
+  firstName       String?
+  lastName        String?
+  
+  supabaseUid     String    @unique
+  email           String    @unique
+  emailVerified   Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  
+  passwordHash    String
+  passwordChangedAt DateTime @default(now())
+  passwordHistory String[]  @default([]) // últimos 5 hashes
+  
+  roles           Role[]
+  
+  // 2FA
+  twoFAEnabled    Boolean   @default(false)
+  totpSecret      String?
+  backupCodes     String[]  @default([]) // JSON array
+  
+  // Sessions
+  sessions        AuthSession[]
+  devices         AuthDevice[]
+  
+  // Security
+  accountLocked   Boolean   @default(false)
+  accountLockedUntil DateTime?
+  accountDisabled Boolean   @default(false)
+  
+  // Preferences
+  rememberMe      Boolean   @default(false)
+  inactivityTimeout Int     @default(28800) // 8 horas
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  permissions     Permission[]
+  auth2fa         Auth2FA?
+  
+  @@index([tenantId])
+  @@index([email])
+  @@index([supabaseUid])
+}
+
+model Permission {
+  id        String   @id @default(uuid())
+  module    String
+  action    String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AuthSession {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  deviceId        String
+  device          AuthDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  
+  accessToken     String    @unique
+  refreshToken    String    @unique
+  refreshTokenFamily String? // para detección de replay
+  
+  expiresAt       DateTime
+  refreshExpiresAt DateTime
+  
+  revokedAt       DateTime?
+  revokeReason    String?
+  
+  lastActivityAt  DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  
+  @@index([userId])
+  @@index([deviceId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+}
+
+model AuthDevice {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name            String    // "Mi iPhone", "Laptop trabajo"
+  deviceType      String    // "ios", "android", "web", "desktop"
+  userAgent       String
+  ipAddress       String
+  fingerprint     String    // device fingerprint
+  
+  osVersion       String?
+  appVersion      String?
+  
+  isTrusted       Boolean   @default(false)
+  trustedUntil    DateTime?
+  
+  lastActivityAt  DateTime  @default(now())
+  lastActivityIp  String?
+  
+  sessions        AuthSession[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([fingerprint])
+}
+
+model AuthAuditLog {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id])
+  
+  userId          String
+  action          String    // login, logout, register, etc.
+  
+  ipAddress       String
+  userAgent       String
+  deviceId        String?
+  geolocation     Json?     // { country, city, lat, lng }
+  
+  result          String    // "success", "failure"
+  reason          String?
+  
+  metadata        Json?     // action-specific data
+  durationMs      Int?
+  severity        String    // "info", "warning", "error", "critical"
+  
+  createdAt       DateTime  @default(now())
+  
+  @@index([tenantId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model AuthTokenBlacklist {
+  id              String    @id @default(cuid())
+  jti             String    @unique // JWT ID
+  expiresAt       DateTime
+  createdAt       DateTime  @default(now())
+  
+  @@index([expiresAt])
+}
+
+model Auth2FA {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  totpSecret      String
+  backupCodes     String[]
+  
+  enabledAt       DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
