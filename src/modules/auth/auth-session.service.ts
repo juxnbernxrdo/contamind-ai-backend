@@ -35,16 +35,22 @@ export class AuthSessionService {
   }
 
   async refreshSession(userId: string, oldRefreshToken: string, context: any) {
-    return this.prisma.$transaction(async (tx) => {
-      const session = await tx.authSession.findUnique({ 
-        where: { refreshToken: oldRefreshToken } 
-      });
+    const result = await this.prisma.$transaction(async (tx) => {
+      const sessions = await tx.$queryRaw<any[]>`SELECT * FROM "AuthSession" WHERE "refreshToken" = ${oldRefreshToken} FOR UPDATE`;
+      const session = sessions[0];
 
       if (!session || session.userId !== userId) {
         throw new UnauthorizedException('Invalid refresh token');
       }
       
       if (session.revokedAt) {
+        // Check if revoked recently (e.g. within 15 seconds). If so, it's likely a concurrent retry, not a replay attack.
+        const isRecentRevocation = (Date.now() - session.revokedAt.getTime()) < 15000;
+        
+        if (isRecentRevocation && session.revokeReason === 'Token rotated') {
+           throw new UnauthorizedException('Token already rotated (concurrent retry)');
+        }
+
         // Replay attack detected! Revoke all related sessions in the same family.
         await tx.authSession.updateMany({
           where: { refreshTokenFamily: session.refreshTokenFamily },
@@ -53,11 +59,11 @@ export class AuthSessionService {
             revokeReason: 'Replay attack detected' 
           }
         });
-        throw new UnauthorizedException('Token has been revoked due to suspicious activity');
+        return { error: 'Replay attack detected' };
       }
 
       if (new Date() > session.refreshExpiresAt) {
-         throw new UnauthorizedException('Refresh token expired');
+         return { error: 'Refresh token expired' };
       }
 
       // Verify and extract is2FAVerified from the old refresh token
@@ -66,7 +72,7 @@ export class AuthSessionService {
         const payload = await this.jwtUtil.verifyToken(oldRefreshToken);
         is2FAVerified = !!payload.is2FAVerified;
       } catch (err) {
-        throw new UnauthorizedException('Refresh token verification failed');
+        return { error: 'Refresh token verification failed' };
       }
 
       // Revoke current token
@@ -104,6 +110,15 @@ export class AuthSessionService {
         refreshToken: newSession.refreshToken
       };
     });
+
+    if ('error' in result) {
+      if (result.error === 'Replay attack detected') {
+        throw new UnauthorizedException('Token has been revoked due to suspicious activity');
+      }
+      throw new UnauthorizedException(result.error);
+    }
+    
+    return result;
   }
 
   async revokeSession(userId: string, refreshToken: string) {

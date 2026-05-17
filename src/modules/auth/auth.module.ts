@@ -8,6 +8,7 @@ import { AuthAdminController } from './auth-admin.controller';
 import { AuthSessionController } from './auth-session.controller';
 import { AuthDeviceController } from './auth-device.controller';
 import { Auth2FAController } from './auth-2fa.controller';
+import { AuthDelegationController } from './auth-delegation.controller';
 
 import { AuthService } from './auth.service';
 import { AuthAdminService } from './auth-admin.service';
@@ -16,6 +17,8 @@ import { AuthDeviceService } from './auth-device.service';
 import { AuthAuditService } from './auth-audit.service';
 import { AuthAnomalyService } from './auth-anomaly.service';
 import { Auth2FAService } from './auth-2fa.service';
+import { AuthDelegationService } from './auth-delegation.service';
+import { AuthM2MService } from './auth-m2m.service';
 
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtRefreshStrategy } from './strategies/jwt-refresh.strategy';
@@ -52,6 +55,7 @@ import { RedisModule } from '../../common/redis/redis.module';
     AuthSessionController,
     AuthDeviceController,
     Auth2FAController,
+    AuthDelegationController,
   ],
   providers: [
     PrismaService,
@@ -62,6 +66,8 @@ import { RedisModule } from '../../common/redis/redis.module';
     AuthAuditService,
     AuthAnomalyService,
     Auth2FAService,
+    AuthDelegationService,
+    AuthM2MService,
     JwtStrategy,
     JwtRefreshStrategy,
     PasswordUtil,

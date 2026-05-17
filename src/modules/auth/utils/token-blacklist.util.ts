@@ -12,12 +12,21 @@ export class TokenBlacklistUtil {
     const ttl = expiresAt - now;
 
     if (ttl > 0) {
-      await this.redis.set(`blacklist:${jti}`, 'true', 'EX', ttl);
+      try {
+        await this.redis.set(`blacklist:${jti}`, 'true', 'EX', ttl);
+      } catch (err) {
+        console.error('Redis error while blacklisting token:', err);
+      }
     }
   }
 
   async isBlacklisted(jti: string): Promise<boolean> {
-    const result = await this.redis.get(`blacklist:${jti}`);
-    return result === 'true';
+    try {
+      const result = await this.redis.get(`blacklist:${jti}`);
+      return result === 'true';
+    } catch (err) {
+      console.error('Redis error while checking blacklist, degrading gracefully (fail-open):', err);
+      return false; // Fail-open to avoid global auth outage
+    }
   }
 }

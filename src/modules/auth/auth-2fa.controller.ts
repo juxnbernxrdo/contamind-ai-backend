@@ -45,21 +45,18 @@ export class Auth2FAController {
     @CurrentUser() user: any,
     @Body() dto: Setup2FADto,
   ) {
-    // dto.token es el código de 6 dígitos
-    // Generamos backup codes en el servicio
-    const setupData = await this.twoFaService.generateSetup(user.id);
-    const backupCodes = setupData.backupCodes;
-    
     try {
-      await this.twoFaService.activateTotp(user.id, dto.token, backupCodes);
+      const { backupCodes } = await this.twoFaService.activateTotp(user.id, dto.token);
+      return {
+        message: '2FA activated successfully',
+        backupCodes,
+      };
     } catch (err) {
+      if (err instanceof BadRequestException) {
+        throw err;
+      }
       throw new UnauthorizedException('Invalid TOTP token. Please try again.');
     }
-
-    return {
-      message: '2FA activated successfully',
-      backupCodes, // Mostrar al usuario una sola vez
-    };
   }
 
   /**
@@ -94,7 +91,7 @@ export class Auth2FAController {
     const context = { ip: req.ip, userAgent: req.headers['user-agent'] || '' };
     
     // Al verificar 2FA, invalidamos la sesión temporal actual y creamos una verificada
-    await this.sessionService.revokeSession(user.id, dto.refreshToken || '');
+    await this.sessionService.revokeSession(user.id, (dto as any).refreshToken || '');
     
     const session = await this.sessionService.createSession(user.id, context, true);
 

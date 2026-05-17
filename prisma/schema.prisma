@@ -18,6 +18,7 @@ model Tenant {
   
   users     User[]
   auditLogs AuthAuditLog[]
+  delegationGrants DelegationGrant[]
 }
 
 enum Role {
@@ -38,7 +39,6 @@ model User {
   firstName       String?
   lastName        String?
   
-  supabaseUid     String    @unique
   email           String    @unique
   emailVerified   Boolean   @default(false)
   emailVerifiedAt DateTime?
@@ -72,10 +72,10 @@ model User {
   
   permissions     Permission[]
   auth2fa         Auth2FA?
+  delegationGrants DelegationGrant[]
   
   @@index([tenantId])
   @@index([email])
-  @@index([supabaseUid])
 }
 
 model Permission {
@@ -192,4 +192,44 @@ model Auth2FA {
   enabledAt       DateTime  @default(now())
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+model ServicePrincipal {
+  id          String    @id @default(cuid())
+  name        String    @unique // e.g., "sri-agent", "iess-agent"
+  description String?
+  publicKey   String?   // For verifying signed requests from agent if needed
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  grants      DelegationGrant[]
+}
+
+model DelegationGrant {
+  id              String    @id @default(cuid())
+  tenantId        String
+  tenant          Tenant    @relation(fields: [tenantId], references: [id])
+  
+  delegatorUserId String
+  delegator       User      @relation(fields: [delegatorUserId], references: [id])
+  
+  agentId         String
+  agent           ServicePrincipal @relation(fields: [agentId], references: [id])
+  
+  actionScope     String    // e.g., "sri:declaracion_iva:enviar"
+  status          String    @default("pending") // pending, approved, consumed, expired, revoked
+  
+  contextMetadata Json?     // data about the action
+  
+  actionToken     String?   @unique // The nonce signed after MFA
+  expiresAt       DateTime
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([tenantId])
+  @@index([delegatorUserId])
+  @@index([agentId])
+  @@index([actionToken])
 }

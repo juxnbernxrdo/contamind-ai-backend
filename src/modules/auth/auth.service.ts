@@ -38,7 +38,6 @@ export class AuthService {
         passwordHash: hashedPassword,
         tenantId: dto.tenantId,
         firstName: dto.name,
-        supabaseUid: dto.email,
       },
     });
 
@@ -151,10 +150,18 @@ export class AuthService {
   }
 
   async logout(userId: string, refreshToken: string, accessTokenInfo?: { jti: string, exp: number }) {
-    if (accessTokenInfo) {
-      await this.blacklistUtil.blacklistToken(accessTokenInfo.jti, accessTokenInfo.exp);
+    try {
+      await this.sessionService.revokeSession(userId, refreshToken);
+    } finally {
+      if (accessTokenInfo) {
+        try {
+          await this.blacklistUtil.blacklistToken(accessTokenInfo.jti, accessTokenInfo.exp);
+        } catch (err) {
+          // Log error or ignore, DB revocation is primary
+        }
+      }
     }
-    return this.sessionService.revokeSession(userId, refreshToken);
+    return { success: true };
   }
 
   async generateReauthToken(userId: string, password: string, context: any): Promise<{ reauthToken: string }> {
