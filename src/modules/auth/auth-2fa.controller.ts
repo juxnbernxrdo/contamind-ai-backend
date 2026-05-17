@@ -8,16 +8,21 @@ import {
   HttpStatus,
   UnauthorizedException,
   BadRequestException,
+  Req,
 } from '@nestjs/common';
 import { Auth2FAService } from './auth-2fa.service';
 import { JwtGuard } from './guards/jwt.guard';
 import { CurrentUser } from './decorators/user.decorator';
 import { Setup2FADto } from './dto/setup-2fa.dto';
 import { Verify2FADto } from './dto/verify-2fa.dto';
+import { AuthSessionService } from './auth-session.service';
 
 @Controller('auth/2fa')
 export class Auth2FAController {
-  constructor(private readonly twoFaService: Auth2FAService) {}
+  constructor(
+    private readonly twoFaService: Auth2FAService,
+    private readonly sessionService: AuthSessionService,
+  ) {}
 
   /**
    * POST /auth/2fa/setup
@@ -67,24 +72,38 @@ export class Auth2FAController {
   async verifyToken(
     @CurrentUser() user: any,
     @Body() dto: Verify2FADto,
+    @Req() req: any,
   ) {
+    let isValid = false;
+    let method = '';
+
     if (dto.totpToken) {
-      const isValid = await this.twoFaService.verifyTotp(user.id, dto.totpToken);
-      if (!isValid) {
-        throw new UnauthorizedException('Invalid TOTP token');
-      }
-      return { verified: true, method: 'totp' };
+      isValid = await this.twoFaService.verifyTotp(user.id, dto.totpToken);
+      method = 'totp';
+    } else if (dto.backupCode) {
+      isValid = await this.twoFaService.verifyBackupCode(user.id, dto.backupCode);
+      method = 'backup_code';
+    } else {
+      throw new BadRequestException('Provide either totpToken or backupCode');
     }
 
-    if (dto.backupCode) {
-      const isValid = await this.twoFaService.verifyBackupCode(user.id, dto.backupCode);
-      if (!isValid) {
-        throw new UnauthorizedException('Invalid or already-used backup code');
-      }
-      return { verified: true, method: 'backup_code' };
+    if (!isValid) {
+      throw new UnauthorizedException(`Invalid ${method} token`);
     }
 
-    throw new BadRequestException('Provide either totpToken or backupCode');
+    const context = { ip: req.ip, userAgent: req.headers['user-agent'] || '' };
+    
+    // Al verificar 2FA, invalidamos la sesión temporal actual y creamos una verificada
+    await this.sessionService.revokeSession(user.id, dto.refreshToken || '');
+    
+    const session = await this.sessionService.createSession(user.id, context, true);
+
+    return {
+      verified: true,
+      method,
+      accessToken: session.accessToken,
+      refreshToken: session.refreshToken,
+    };
   }
 
   /**

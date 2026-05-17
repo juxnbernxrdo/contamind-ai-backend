@@ -26,6 +26,8 @@ import { DeviceFingerprintUtil } from './utils/device-fingerprint.util';
 import { GeolocationUtil } from './utils/geolocation.util';
 import { AnomalyScorerUtil } from './utils/anomaly-scorer.util';
 import { RateLimitUtil } from './utils/rate-limit.util';
+import { TokenBlacklistUtil } from './utils/token-blacklist.util';
+import { PermissionCacheUtil } from './utils/permission-cache.util';
 
 import { PermissionGuard } from './guards/permission.guard';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -68,8 +70,10 @@ import { RedisModule } from '../../common/redis/redis.module';
     GeolocationUtil,
     AnomalyScorerUtil,
     RateLimitUtil,
+    TokenBlacklistUtil,
+    PermissionCacheUtil,
     PermissionGuard,
   ],
-  exports: [AuthService, AuthSessionService, AuthDeviceService, AuthAuditService, Auth2FAService],
+  exports: [AuthService, AuthSessionService, AuthDeviceService, AuthAuditService, Auth2FAService, TokenBlacklistUtil, PermissionCacheUtil],
 })
 export class AuthModule {}

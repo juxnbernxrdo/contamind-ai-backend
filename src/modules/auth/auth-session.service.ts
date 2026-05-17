@@ -11,11 +11,11 @@ export class AuthSessionService {
     private deviceService: AuthDeviceService
   ) {}
 
-  async createSession(userId: string, context: any) {
+  async createSession(userId: string, context: any, is2FAVerified: boolean = false) {
     const device = await this.deviceService.registerOrUpdateDevice(userId, context);
     
-    const accessToken = this.jwtUtil.generateAccessToken({ sub: userId });
-    const refreshToken = this.jwtUtil.generateRefreshToken({ sub: userId });
+    const accessToken = this.jwtUtil.generateAccessToken({ sub: userId, is2FAVerified });
+    const refreshToken = this.jwtUtil.generateRefreshToken({ sub: userId, is2FAVerified });
     
     // Revoke old sessions if exceeding limit (e.g. max 5)
     
@@ -25,6 +25,7 @@ export class AuthSessionService {
         deviceId: device.id,
         accessToken,
         refreshToken,
+        refreshTokenFamily: refreshToken, // Initial family is the first refresh token
         expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min
         refreshExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
       }
@@ -34,40 +35,75 @@ export class AuthSessionService {
   }
 
   async refreshSession(userId: string, oldRefreshToken: string, context: any) {
-    const session = await this.prisma.authSession.findUnique({ where: { refreshToken: oldRefreshToken } });
-    if (!session || session.userId !== userId) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-    
-    if (session.revokedAt) {
-      // Replay attack detected! Revoke all related sessions here.
-      throw new UnauthorizedException('Token has been revoked');
-    }
+    return this.prisma.$transaction(async (tx) => {
+      const session = await tx.authSession.findUnique({ 
+        where: { refreshToken: oldRefreshToken } 
+      });
 
-    if (new Date() > session.refreshExpiresAt) {
-       throw new UnauthorizedException('Refresh token expired');
-    }
-
-    // Generate new tokens
-    const accessToken = this.jwtUtil.generateAccessToken({ sub: userId });
-    const newRefreshToken = this.jwtUtil.generateRefreshToken({ sub: userId });
-
-    // Invalidate old session and create new one, or just update current
-    // We update to rotate refresh token
-    const updated = await this.prisma.authSession.update({
-      where: { id: session.id },
-      data: {
-        accessToken,
-        refreshToken: newRefreshToken,
-        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-        lastActivityAt: new Date()
+      if (!session || session.userId !== userId) {
+        throw new UnauthorizedException('Invalid refresh token');
       }
-    });
+      
+      if (session.revokedAt) {
+        // Replay attack detected! Revoke all related sessions in the same family.
+        await tx.authSession.updateMany({
+          where: { refreshTokenFamily: session.refreshTokenFamily },
+          data: { 
+            revokedAt: new Date(), 
+            revokeReason: 'Replay attack detected' 
+          }
+        });
+        throw new UnauthorizedException('Token has been revoked due to suspicious activity');
+      }
 
-    return {
-      accessToken: updated.accessToken,
-      refreshToken: updated.refreshToken
-    };
+      if (new Date() > session.refreshExpiresAt) {
+         throw new UnauthorizedException('Refresh token expired');
+      }
+
+      // Verify and extract is2FAVerified from the old refresh token
+      let is2FAVerified = false;
+      try {
+        const payload = await this.jwtUtil.verifyToken(oldRefreshToken);
+        is2FAVerified = !!payload.is2FAVerified;
+      } catch (err) {
+        throw new UnauthorizedException('Refresh token verification failed');
+      }
+
+      // Revoke current token
+      await tx.authSession.update({
+        where: { id: session.id },
+        data: { 
+          revokedAt: new Date(), 
+          revokeReason: 'Token rotated' 
+        }
+      });
+
+      // Generate new tokens, inheriting is2FAVerified
+      const accessToken = this.jwtUtil.generateAccessToken({ 
+        sub: userId, 
+        is2FAVerified
+      });
+      const newRefreshToken = this.jwtUtil.generateRefreshToken({ sub: userId, is2FAVerified });
+
+      // Create new session in the same family
+      const newSession = await tx.authSession.create({
+        data: {
+          userId,
+          deviceId: session.deviceId,
+          accessToken,
+          refreshToken: newRefreshToken,
+          refreshTokenFamily: session.refreshTokenFamily,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+          refreshExpiresAt: session.refreshExpiresAt,
+          lastActivityAt: new Date()
+        }
+      });
+
+      return {
+        accessToken: newSession.accessToken,
+        refreshToken: newSession.refreshToken
+      };
+    });
   }
 
   async revokeSession(userId: string, refreshToken: string) {

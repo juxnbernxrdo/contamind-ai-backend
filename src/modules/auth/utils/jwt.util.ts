@@ -13,4 +13,8 @@ export class JwtUtil {
   generateRefreshToken(payload: any): string {
     return this.jwtService.sign({ ...payload, jti: uuidv4() }, { expiresIn: '30d' });
   }
+
+  async verifyToken(token: string): Promise<any> {
+    return this.jwtService.verifyAsync(token);
+  }
 }

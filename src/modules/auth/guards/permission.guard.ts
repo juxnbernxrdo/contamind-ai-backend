@@ -3,18 +3,17 @@ import {
   CanActivate,
   ExecutionContext,
   ForbiddenException,
-  Inject,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '../../../prisma/prisma.service';
-import Redis from 'ioredis';
+import { PermissionCacheUtil } from '../utils/permission-cache.util';
 
 @Injectable()
 export class PermissionGuard implements CanActivate {
   constructor(
     private readonly reflector: Reflector,
     private readonly prisma: PrismaService,
-    @Inject('REDIS_CLIENT') private readonly redis: Redis,
+    private readonly permissionCache: PermissionCacheUtil,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -33,20 +32,10 @@ export class PermissionGuard implements CanActivate {
     }
 
     // ━━━ CACHÉ REDIS ━━━
-    const cacheKey = `perms:${userId}`;
-    let userPermissions: string[] = [];
-
-    try {
-      const cached = await this.redis.get(cacheKey);
-      if (cached) {
-        userPermissions = JSON.parse(cached);
-      }
-    } catch (err) {
-      // Redis error, ignorar y consultar DB
-    }
+    let userPermissions = await this.permissionCache.getPermissions(userId);
 
     // Si no está en caché, consultar DB
-    if (userPermissions.length === 0) {
+    if (!userPermissions) {
       const user = await this.prisma.user.findUnique({
         where: { id: userId },
         include: {
@@ -62,7 +51,7 @@ export class PermissionGuard implements CanActivate {
         throw new ForbiddenException('Account is inactive');
       }
 
-      // Extraer permisos directos (basado en el esquema real)
+      // Extraer permisos directos
       userPermissions = user.permissions.flatMap((p) => [
         `${p.module}.${p.action}`,
         p.module,
@@ -71,11 +60,7 @@ export class PermissionGuard implements CanActivate {
       ]);
 
       // Guardar en caché por 5 minutos
-      try {
-        await this.redis.setex(cacheKey, 300, JSON.stringify(userPermissions));
-      } catch (err) {
-        // Redis error, continuar sin caché
-      }
+      await this.permissionCache.setPermissions(userId, userPermissions);
     }
 
     // ━━━ FIN CACHÉ ━━━

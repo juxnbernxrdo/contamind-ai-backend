@@ -6,6 +6,8 @@ import { AuthSessionService } from './auth-session.service';
 import { AuthAuditService } from './auth-audit.service';
 import { RateLimitUtil } from './utils/rate-limit.util';
 import { AnomalyScorerUtil } from './utils/anomaly-scorer.util';
+import { TokenBlacklistUtil } from './utils/token-blacklist.util';
+import { PermissionCacheUtil } from './utils/permission-cache.util';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
@@ -21,6 +23,8 @@ export class AuthService {
     private readonly rateLimitUtil: RateLimitUtil,
     private readonly anomalyService: AnomalyScorerUtil,
     private readonly jwtService: JwtService,
+    private readonly blacklistUtil: TokenBlacklistUtil,
+    private readonly permissionCache: PermissionCacheUtil,
   ) {}
 
   async register(dto: RegisterDto, context: any) {
@@ -123,7 +127,8 @@ export class AuthService {
     }
     // ━━━ FIN ANOMALY SCORING ━━━
 
-    const session = await this.sessionService.createSession(user.id, context);
+    const is2FAVerified = !user.twoFAEnabled;
+    const session = await this.sessionService.createSession(user.id, context, is2FAVerified);
     await this.auditService.log(user.tenantId, user.id, 'login', context, 'success');
 
     return {
@@ -135,6 +140,7 @@ export class AuthService {
         roles: user.roles,
         tenantId: user.tenantId,
         twoFAEnabled: user.twoFAEnabled,
+        is2FAVerified,
       },
       ...(anomalyResult.flags.length > 0 && { securityWarnings: anomalyResult.flags }),
     };
@@ -144,7 +150,10 @@ export class AuthService {
     return this.sessionService.refreshSession(user.id, dto.refreshToken, context);
   }
 
-  async logout(userId: string, refreshToken: string) {
+  async logout(userId: string, refreshToken: string, accessTokenInfo?: { jti: string, exp: number }) {
+    if (accessTokenInfo) {
+      await this.blacklistUtil.blacklistToken(accessTokenInfo.jti, accessTokenInfo.exp);
+    }
     return this.sessionService.revokeSession(userId, refreshToken);
   }
 
@@ -195,6 +204,7 @@ export class AuthService {
       },
     });
 
+    await this.permissionCache.invalidate(userId);
     await this.sessionService.revokeAllSessions(userId);
     await this.auditService.log(user.tenantId, user.id, 'change_password', context, 'success');
     return { message: 'Password changed successfully. All sessions have been revoked.' };
