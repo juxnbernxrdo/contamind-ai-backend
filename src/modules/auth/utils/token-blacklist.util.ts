@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, InternalServerErrorException } from '@nestjs/common';
 import Redis from 'ioredis';
 
 @Injectable()
@@ -15,7 +15,9 @@ export class TokenBlacklistUtil {
       try {
         await this.redis.set(`blacklist:${jti}`, 'true', 'EX', ttl);
       } catch (err) {
-        console.error('Redis error while blacklisting token:', err);
+        // P1 — Enforce strict fail-closed Redis writes
+        console.error('CRITICAL: Redis error while blacklisting token:', err);
+        throw new InternalServerErrorException('Security persistence failure. Revocation could not be guaranteed.');
       }
     }
   }
@@ -25,8 +27,9 @@ export class TokenBlacklistUtil {
       const result = await this.redis.get(`blacklist:${jti}`);
       return result === 'true';
     } catch (err) {
-      console.error('Redis error while checking blacklist, degrading gracefully (fail-open):', err);
-      return false; // Fail-open to avoid global auth outage
+      console.error('CRITICAL: Redis error while checking blacklist:', err);
+      // FAIL-CLOSED: If we can't verify revocation status, we must reject the token
+      throw new InternalServerErrorException('Security verification service unavailable');
     }
   }
 }

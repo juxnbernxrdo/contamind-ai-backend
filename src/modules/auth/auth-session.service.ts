@@ -12,12 +12,13 @@ export class AuthSessionService {
   ) {}
 
   async createSession(userId: string, context: any, is2FAVerified: boolean = false) {
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     const device = await this.deviceService.registerOrUpdateDevice(userId, context);
     
-    const accessToken = this.jwtUtil.generateAccessToken({ sub: userId, is2FAVerified });
-    const refreshToken = this.jwtUtil.generateRefreshToken({ sub: userId, is2FAVerified });
-    
-    // Revoke old sessions if exceeding limit (e.g. max 5)
+    // Include securityVersion in payload
+    const payload = { sub: userId, is2FAVerified, sv: user.securityVersion };
+    const accessToken = this.jwtUtil.generateAccessToken(payload);
+    const refreshToken = this.jwtUtil.generateRefreshToken(payload);
     
     const session = await this.prisma.authSession.create({
       data: {
@@ -25,7 +26,8 @@ export class AuthSessionService {
         deviceId: device.id,
         accessToken,
         refreshToken,
-        refreshTokenFamily: refreshToken, // Initial family is the first refresh token
+        refreshTokenFamily: refreshToken,
+        securityVersion: user.securityVersion, // CAPTURE current security version
         expiresAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min
         refreshExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
       }
@@ -41,6 +43,21 @@ export class AuthSessionService {
 
       if (!session || session.userId !== userId) {
         throw new UnauthorizedException('Invalid refresh token');
+      }
+
+      // SECURITY RECONCILIATION
+      const user = await tx.user.findUnique({ where: { id: userId } });
+      if (!user || user.accountDisabled || user.accountLocked) {
+        throw new UnauthorizedException('User account is restricted');
+      }
+
+      if (session.securityVersion !== user.securityVersion) {
+        // SECURITY DRIFT DETECTED: Revoke family
+        await tx.authSession.updateMany({
+          where: { refreshTokenFamily: session.refreshTokenFamily },
+          data: { revokedAt: new Date(), revokeReason: 'Security version drift' }
+        });
+        return { error: 'Security state changed. Please login again.' };
       }
       
       if (session.revokedAt) {
@@ -84,14 +101,12 @@ export class AuthSessionService {
         }
       });
 
-      // Generate new tokens, inheriting is2FAVerified
-      const accessToken = this.jwtUtil.generateAccessToken({ 
-        sub: userId, 
-        is2FAVerified
-      });
-      const newRefreshToken = this.jwtUtil.generateRefreshToken({ sub: userId, is2FAVerified });
+      // Generate new tokens, inheriting is2FAVerified and current securityVersion
+      const payload = { sub: userId, is2FAVerified, sv: user.securityVersion };
+      const accessToken = this.jwtUtil.generateAccessToken(payload);
+      const newRefreshToken = this.jwtUtil.generateRefreshToken(payload);
 
-      // Create new session in the same family
+      // Create new session in the same family, maintaining securityVersion
       const newSession = await tx.authSession.create({
         data: {
           userId,
@@ -99,6 +114,7 @@ export class AuthSessionService {
           accessToken,
           refreshToken: newRefreshToken,
           refreshTokenFamily: session.refreshTokenFamily,
+          securityVersion: user.securityVersion,
           expiresAt: new Date(Date.now() + 15 * 60 * 1000),
           refreshExpiresAt: session.refreshExpiresAt,
           lastActivityAt: new Date()

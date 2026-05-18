@@ -6,6 +6,7 @@ import Redis from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service';
 import { AuthAuditService } from './auth-audit.service';
 import { AuthSessionService } from './auth-session.service';
+import { EncryptionUtil } from './utils/encryption.util';
 
 @Injectable()
 export class Auth2FAService {
@@ -13,6 +14,7 @@ export class Auth2FAService {
     private readonly prisma: PrismaService,
     private readonly audit: AuthAuditService,
     private readonly sessionService: AuthSessionService,
+    private readonly encryptionUtil: EncryptionUtil,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
@@ -35,10 +37,16 @@ export class Auth2FAService {
     const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
     const backupCodes = this.generateBackupCodes(10);
     
-    // Guardar secreto temporal (no activado aún, se activa al verificar)
+    // ENCRYPT secret before temporary storage
+    const encrypted = this.encryptionUtil.encrypt(secret);
+    
     await this.prisma.user.update({
       where: { id: userId },
-      data: { totpSecret: secret } // twoFAEnabled permanece false hasta verify
+      data: { 
+        totpSecret: encrypted.ciphertext,
+        totpIv: encrypted.iv,
+        totpAuthTag: encrypted.authTag,
+      }
     });
 
     return { secret, otpauthUrl, qrCodeDataUrl, backupCodes };
@@ -47,11 +55,14 @@ export class Auth2FAService {
   async activateTotp(userId: string, token: string): Promise<{ backupCodes: string[] }> {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     
-    if (!user.totpSecret) {
+    if (!user.totpSecret || !user.totpIv || !user.totpAuthTag) {
       throw new BadRequestException('2FA setup not initiated. Call /auth/2fa/setup first.');
     }
 
-    if (!authenticator.verify({ token, secret: user.totpSecret })) {
+    // DECRYPT for verification
+    const secret = this.encryptionUtil.decrypt(user.totpSecret, user.totpIv, user.totpAuthTag);
+
+    if (!authenticator.verify({ token, secret })) {
       throw new UnauthorizedException('Invalid TOTP token. Check your authenticator app.');
     }
 
@@ -63,6 +74,7 @@ export class Auth2FAService {
       data: {
         twoFAEnabled: true,
         backupCodes: hashedCodes,
+        securityVersion: { increment: 1 },
       }
     });
 
@@ -76,23 +88,39 @@ export class Auth2FAService {
   async verifyTotp(userId: string, token: string): Promise<boolean> {
     const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
     
-    if (!user.twoFAEnabled || !user.totpSecret) {
+    if (!user.twoFAEnabled || !user.totpSecret || !user.totpIv || !user.totpAuthTag) {
       throw new BadRequestException('2FA is not enabled for this user.');
     }
 
     const usedKey = `totp_used:${userId}:${token}`;
-    const isUsed = await this.redis.get(usedKey);
-    if (isUsed) {
-      throw new UnauthorizedException('TOTP token already used (replay detected).');
+    
+    // FAIL-CLOSED for replay protection
+    try {
+      const isUsed = await this.redis.get(usedKey);
+      if (isUsed) {
+        throw new UnauthorizedException('TOTP token already used (replay detected).');
+      }
+    } catch (err) {
+      if (err instanceof UnauthorizedException) throw err;
+      // If Redis is down, we must block privileged MFA verification to be safe
+      throw new InternalServerErrorException('Security verification service unavailable');
     }
+
+    const secret = this.encryptionUtil.decrypt(user.totpSecret, user.totpIv, user.totpAuthTag);
 
     // Verificar con ventana de ±1 período (30s) para tolerar desincronización de reloj
     authenticator.options = { window: 1 };
-    const isValid = authenticator.verify({ token, secret: user.totpSecret });
+    const isValid = authenticator.verify({ token, secret });
     
     if (isValid) {
       // Marcar como usado por 60s (cubre la ventana actual y ±1)
-      await this.redis.set(usedKey, '1', 'EX', 60);
+      try {
+        await this.redis.set(usedKey, '1', 'EX', 60);
+      } catch (err) {
+        // P1 — Enforce strict fail-closed Redis writes
+        console.error('CRITICAL: Redis error while marking TOTP as used:', err);
+        throw new InternalServerErrorException('Security persistence failure. Action blocked.');
+      }
     }
     
     return isValid;
@@ -131,14 +159,15 @@ export class Auth2FAService {
       data: {
         twoFAEnabled: false,
         totpSecret: null,
+        totpIv: null,
+        totpAuthTag: null,
         backupCodes: [],
+        securityVersion: { increment: 1 },
       }
     });
 
-    await this.audit.log(
-      (await this.prisma.user.findUniqueOrThrow({ where: { id: userId } })).tenantId,
-      userId, '2fa_disabled', context, 'success'
-    );
+    const user = await this.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+    await this.audit.log(user.tenantId, userId, '2fa_disabled', context, 'success');
   }
 
   async regenerateBackupCodes(userId: string, token: string): Promise<string[]> {
@@ -150,7 +179,10 @@ export class Auth2FAService {
 
     await this.prisma.user.update({
       where: { id: userId },
-      data: { backupCodes: hashed }
+      data: { 
+        backupCodes: hashed,
+        securityVersion: { increment: 1 },
+      }
     });
 
     return newCodes; // Retornar en texto plano UNA sola vez al usuario

@@ -6,6 +6,9 @@ import { AuthSessionService } from '../auth-session.service';
 import { AuthAuditService } from '../auth-audit.service';
 import { RateLimitUtil } from '../utils/rate-limit.util';
 import { AnomalyScorerUtil } from '../utils/anomaly-scorer.util';
+import { GeolocationUtil } from '../utils/geolocation.util';
+import { TokenBlacklistUtil } from '../utils/token-blacklist.util';
+import { PermissionCacheUtil } from '../utils/permission-cache.util';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { BadRequestException, UnauthorizedException, HttpException } from '@nestjs/common';
 
@@ -29,7 +32,9 @@ const mockAnomalyScorer = {
 const mockPrisma = {
   user: {
     findUnique: jest.fn(),
+    findUniqueOrThrow: jest.fn(),
     create: jest.fn(),
+    update: jest.fn(),
   },
   authSession: {
     count: jest.fn().mockResolvedValue(0),
@@ -39,6 +44,8 @@ const mockPrisma = {
   },
   authAuditLog: {
     findFirst: jest.fn().mockResolvedValue(null),
+    count: jest.fn().mockResolvedValue(0),
+    findMany: jest.fn().mockResolvedValue([]),
   },
 };
 
@@ -52,10 +59,20 @@ describe('AuthService', () => {
         PasswordUtil,
         { provide: PrismaService, useValue: mockPrisma },
         { provide: AuthSessionService, useValue: { createSession: jest.fn() } },
-        { provide: AuthAuditService, useValue: { log: jest.fn() } },
+        { provide: AuthAuditService, useValue: { 
+            log: jest.fn(),
+            getKnownCountries: jest.fn().mockResolvedValue([]),
+            getKnownUserAgents: jest.fn().mockResolvedValue([]),
+            getFailedAttemptsLast24h: jest.fn().mockResolvedValue(0),
+            getLastSuccessfulLogin: jest.fn().mockResolvedValue(null),
+          } 
+        },
         { provide: RateLimitUtil, useValue: mockRateLimitUtil },
         { provide: AnomalyScorerUtil, useValue: mockAnomalyScorer },
+        { provide: GeolocationUtil, useValue: { getLocation: jest.fn().mockReturnValue({}) } },
         { provide: JwtService, useValue: { sign: jest.fn().mockReturnValue('mock.jwt.token') } },
+        { provide: TokenBlacklistUtil, useValue: { blacklistToken: jest.fn() } },
+        { provide: PermissionCacheUtil, useValue: { invalidate: jest.fn() } },
       ],
     }).compile();
 

@@ -6,6 +6,7 @@ import { AuthSessionService } from './auth-session.service';
 import { AuthAuditService } from './auth-audit.service';
 import { RateLimitUtil } from './utils/rate-limit.util';
 import { AnomalyScorerUtil } from './utils/anomaly-scorer.util';
+import { GeolocationUtil } from './utils/geolocation.util';
 import { TokenBlacklistUtil } from './utils/token-blacklist.util';
 import { PermissionCacheUtil } from './utils/permission-cache.util';
 import { RegisterDto } from './dto/register.dto';
@@ -22,6 +23,7 @@ export class AuthService {
     private readonly auditService: AuthAuditService,
     private readonly rateLimitUtil: RateLimitUtil,
     private readonly anomalyService: AnomalyScorerUtil,
+    private readonly geoUtil: GeolocationUtil,
     private readonly jwtService: JwtService,
     private readonly blacklistUtil: TokenBlacklistUtil,
     private readonly permissionCache: PermissionCacheUtil,
@@ -32,6 +34,10 @@ export class AuthService {
     if (existingUser) throw new BadRequestException('Email already exists');
 
     const hashedPassword = await this.passwordUtil.hash(dto.password);
+    
+    // Populate geolocation
+    context.geolocation = this.geoUtil.getLocation(context.ip);
+
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
@@ -49,6 +55,10 @@ export class AuthService {
     // ━━━ RATE LIMITING ━━━
     const rateLimitKey = `login:${dto.email}`;
     const rateLimitCheck = await this.rateLimitUtil.checkRateLimit(rateLimitKey, 5, 60);
+    
+    // POPULATE GEOLOCATION
+    context.geolocation = this.geoUtil.getLocation(context.ip);
+
     if (!rateLimitCheck.allowed) {
       await this.auditService.log(
         'unknown-tenant',
@@ -84,18 +94,30 @@ export class AuthService {
 
     await this.rateLimitUtil.resetFailures(`login:${dto.email}`);
 
-    // ━━━ ANOMALY SCORING ━━━
+    // ━━━ ANOMALY SCORING (REAL DATA) ━━━
+    const [knownCountries, knownUserAgents, failedAttempts, lastLogin, concurrentSessions] = await Promise.all([
+      this.auditService.getKnownCountries(user.id),
+      this.auditService.getKnownUserAgents(user.id),
+      this.auditService.getFailedAttemptsLast24h(user.id),
+      this.auditService.getLastSuccessfulLogin(user.id),
+      this.prisma.authSession.count({ where: { userId: user.id, revokedAt: null } }),
+    ]);
+
     const anomalyResult = this.anomalyService.score({
       userId: user.id,
       ip: context.ip,
       userAgent: context.userAgent,
       timestamp: new Date(),
-      knownCountries: ['EC'], // TODO: Buscar del historial después
-      knownUserAgents: [],     // TODO: Buscar del historial después
+      knownCountries,
+      knownUserAgents,
       usualHourStart: 8,
-      usualHourEnd: 20,
-      failedAttemptsLast24h: 0, // TODO: Contar desde AuthAuditLog
-      concurrentSessionsCount: (await this.prisma.authSession.count({ where: { userId: user.id, revokedAt: null } })),
+      usualHourEnd: 22,
+      failedAttemptsLast24h: failedAttempts,
+      concurrentSessionsCount: concurrentSessions,
+      lastLoginIp: lastLogin?.ipAddress,
+      lastLoginTime: lastLogin?.createdAt,
+      lastLoginLat: (lastLogin?.geolocation as any)?.lat,
+      lastLoginLon: (lastLogin?.geolocation as any)?.lng,
     });
 
     if (anomalyResult.action === 'block') {
@@ -149,18 +171,22 @@ export class AuthService {
     return this.sessionService.refreshSession(user.id, dto.refreshToken, context);
   }
 
-  async logout(userId: string, refreshToken: string, accessTokenInfo?: { jti: string, exp: number }) {
-    try {
-      await this.sessionService.revokeSession(userId, refreshToken);
-    } finally {
-      if (accessTokenInfo) {
-        try {
-          await this.blacklistUtil.blacklistToken(accessTokenInfo.jti, accessTokenInfo.exp);
-        } catch (err) {
-          // Log error or ignore, DB revocation is primary
-        }
-      }
+  async logout(
+    userId: string,
+    refreshToken: string,
+    accessTokenInfo?: { jti: string; exp: number },
+  ) {
+    // ━━━ FAIL-CLOSED REVOCATION (Target 4) ━━━
+    // We MUST ensure both DB session revocation AND JWT blacklisting succeed.
+    await this.sessionService.revokeSession(userId, refreshToken);
+
+    if (accessTokenInfo) {
+      await this.blacklistUtil.blacklistToken(
+        accessTokenInfo.jti,
+        accessTokenInfo.exp,
+      );
     }
+
     return { success: true };
   }
 
@@ -208,6 +234,7 @@ export class AuthService {
         passwordHash: newHash,
         passwordHistory: updatedHistory,
         passwordChangedAt: new Date(),
+        securityVersion: { increment: 1 },
       },
     });
 

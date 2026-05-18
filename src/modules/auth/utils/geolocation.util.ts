@@ -2,12 +2,14 @@ import { Injectable } from '@nestjs/common';
 import * as geoip from 'geoip-lite';
 
 export interface GeoLocation {
-  country: string;       // "EC"
-  countryName: string;   // "Ecuador"
+  country: string;       // "Ecuador"
+  countryCode: string;   // "EC"
   city: string;
   region: string;
-  latitude: number;
-  longitude: number;
+  lat: number;
+  lng: number;
+  latitude: number;      // Keep for backward compatibility if needed within the file
+  longitude: number;     // Keep for backward compatibility if needed within the file
   timezone: string;
   isPrivateIP: boolean;
 }
@@ -19,8 +21,8 @@ export class GeolocationUtil {
     const privateRanges = ['127.0.0.1', '::1', 'localhost'];
     if (privateRanges.includes(ip) || ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.')) {
       return {
-        country: 'LOCAL', countryName: 'Local Network', city: 'Local',
-        region: '', latitude: 0, longitude: 0,
+        country: 'Local Network', countryCode: 'LOCAL', city: 'Local',
+        region: '', lat: 0, lng: 0, latitude: 0, longitude: 0,
         timezone: 'UTC', isPrivateIP: true
       };
     }
@@ -28,19 +30,24 @@ export class GeolocationUtil {
     const geo = geoip.lookup(ip);
     if (!geo) {
       return {
-        country: 'UNKNOWN', countryName: 'Unknown', city: 'Unknown',
-        region: '', latitude: 0, longitude: 0,
+        country: 'Unknown', countryCode: 'UNKNOWN', city: 'Unknown',
+        region: '', lat: 0, lng: 0, latitude: 0, longitude: 0,
         timezone: 'UTC', isPrivateIP: false
       };
     }
 
+    const latitude = geo.ll?.[0] ?? 0;
+    const longitude = geo.ll?.[1] ?? 0;
+
     return {
-      country: geo.country,
-      countryName: geo.country, // geoip-lite no tiene nombre completo, aceptable
+      country: geo.country, 
+      countryCode: geo.country,
       city: geo.city || 'Unknown',
       region: geo.region || '',
-      latitude: geo.ll?.[0] ?? 0,
-      longitude: geo.ll?.[1] ?? 0,
+      lat: latitude,
+      lng: longitude,
+      latitude,
+      longitude,
       timezone: geo.timezone || 'UTC',
       isPrivateIP: false
     };

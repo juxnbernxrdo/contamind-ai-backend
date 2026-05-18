@@ -49,10 +49,12 @@ model User {
   
   roles           Role[]
   
-  // 2FA
+  // 2FA - Encrypted Fields
   twoFAEnabled    Boolean   @default(false)
-  totpSecret      String?
-  backupCodes     String[]  @default([]) // JSON array
+  totpSecret      String?   // Encrypted ciphertext
+  totpIv          String?   // Initialization Vector
+  totpAuthTag     String?   // Authentication Tag
+  backupCodes     String[]  @default([]) // Hashed backup codes
   
   // Sessions
   sessions        AuthSession[]
@@ -62,6 +64,7 @@ model User {
   accountLocked   Boolean   @default(false)
   accountLockedUntil DateTime?
   accountDisabled Boolean   @default(false)
+  securityVersion Int       @default(1) // Incremented on critical security events (pwd change, MFA toggle)
   
   // Preferences
   rememberMe      Boolean   @default(false)
@@ -71,7 +74,6 @@ model User {
   updatedAt       DateTime  @updatedAt
   
   permissions     Permission[]
-  auth2fa         Auth2FA?
   delegationGrants DelegationGrant[]
   
   @@index([tenantId])
@@ -99,6 +101,8 @@ model AuthSession {
   accessToken     String    @unique
   refreshToken    String    @unique
   refreshTokenFamily String? // para detección de replay
+  
+  securityVersion Int       @default(1) // Captures User.securityVersion at time of issuance
   
   expiresAt       DateTime
   refreshExpiresAt DateTime
@@ -164,12 +168,16 @@ model AuthAuditLog {
   durationMs      Int?
   severity        String    // "info", "warning", "error", "critical"
   
+  previousHash    String?
+  hash            String?
+  
   createdAt       DateTime  @default(now())
   
   @@index([tenantId])
   @@index([userId])
   @@index([action])
   @@index([createdAt])
+  @@index([hash])
 }
 
 model AuthTokenBlacklist {
@@ -181,25 +189,14 @@ model AuthTokenBlacklist {
   @@index([expiresAt])
 }
 
-model Auth2FA {
-  id              String    @id @default(cuid())
-  userId          String    @unique
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  totpSecret      String
-  backupCodes     String[]
-  
-  enabledAt       DateTime  @default(now())
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-}
-
 model ServicePrincipal {
   id          String    @id @default(cuid())
   name        String    @unique // e.g., "sri-agent", "iess-agent"
   description String?
+  hashedSecret String?   // Hashed secret for M2M verification
   publicKey   String?   // For verifying signed requests from agent if needed
   isActive    Boolean   @default(true)
+  securityVersion Int   @default(1)
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 

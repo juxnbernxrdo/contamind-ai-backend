@@ -1,4 +1,4 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, InternalServerErrorException } from '@nestjs/common';
 import Redis from 'ioredis';
 
 export interface RateLimitResult {
@@ -22,30 +22,49 @@ export class RateLimitUtil {
     const redisKey = `rl:${key}`;
     const now = Date.now();
     const windowMs = windowSeconds * 1000;
-
-    // Sliding window con sorted set
-    const pipeline = this.redis.pipeline();
-    pipeline.zremrangebyscore(redisKey, 0, now - windowMs);        // Limpiar expirados
-    pipeline.zadd(redisKey, now, `${now}-${Math.random()}`);       // Agregar request actual
-    pipeline.zcard(redisKey);                                       // Contar requests en ventana
-    pipeline.expire(redisKey, windowSeconds + 1);                  // TTL para cleanup
-    
-    const results = await pipeline.exec();
-    const count = results?.[2]?.[1] as number ?? 0;
-
-    const allowed = count <= limit;
     const resetAt = new Date(now + windowMs);
 
-    if (!allowed) {
-      // Calcular cuándo se puede reintentar
-      const oldest = await this.redis.zrange(redisKey, 0, 0, 'WITHSCORES');
-      const oldestTime = oldest[1] ? parseInt(oldest[1]) : now;
-      const retryAfterSeconds = Math.ceil((oldestTime + windowMs - now) / 1000);
+    try {
+      // Sliding window con sorted set
+      const pipeline = this.redis.pipeline();
+      pipeline.zremrangebyscore(redisKey, 0, now - windowMs); // Limpiar expirados
+      pipeline.zadd(redisKey, now, `${now}-${Math.random()}`); // Agregar request actual
+      pipeline.zcard(redisKey); // Contar requests en ventana
+      pipeline.expire(redisKey, windowSeconds + 1); // TTL para cleanup
 
-      return { allowed: false, remaining: 0, resetAt, retryAfterSeconds };
+      const results = await pipeline.exec();
+
+      if (!results) {
+        throw new Error('Redis pipeline execution failed');
+      }
+
+      // ━━━ FAIL-CLOSED: Check every pipeline command result for errors ━━━
+      for (const [err] of results) {
+        if (err) throw err;
+      }
+
+      const count = results[2][1] as number;
+      const allowed = count <= limit;
+
+      if (!allowed) {
+        // Calcular cuándo se puede reintentar
+        const oldest = await this.redis.zrange(redisKey, 0, 0, 'WITHSCORES');
+        const oldestTime = oldest[1] ? parseInt(oldest[1]) : now;
+        const retryAfterSeconds = Math.ceil(
+          (oldestTime + windowMs - now) / 1000,
+        );
+
+        return { allowed: false, remaining: 0, resetAt, retryAfterSeconds };
+      }
+
+      return { allowed: true, remaining: limit - count, resetAt };
+    } catch (err) {
+      console.error('CRITICAL: Redis error in rate-limit check:', err);
+      // FAIL-CLOSED: Block if we can't verify rate limits
+      throw new InternalServerErrorException(
+        'Security verification service unavailable',
+      );
     }
-
-    return { allowed: true, remaining: limit - count, resetAt };
   }
 
   /**
@@ -54,30 +73,49 @@ export class RateLimitUtil {
    */
   async getLoginBackoffDelay(identifier: string): Promise<number> {
     const key = `backoff:${identifier}`;
-    const failures = parseInt(await this.redis.get(key) ?? '0');
+    try {
+      const failures = parseInt(await this.redis.get(key) ?? '0');
 
-    if (failures <= 0) return 0;
-    if (failures <= 3) return 1_000;
-    if (failures <= 5) return 5_000;
-    return 30_000; // máximo 30s
+      if (failures <= 0) return 0;
+      if (failures <= 3) return 1_000;
+      if (failures <= 5) return 5_000;
+      return 30_000; // máximo 30s
+    } catch (err) {
+      // Passive check can fail open or return 0
+      return 0;
+    }
   }
 
   async incrementFailures(identifier: string, ttlSeconds = 900): Promise<number> {
     const key = `backoff:${identifier}`;
-    const count = await this.redis.incr(key);
-    if (count === 1) await this.redis.expire(key, ttlSeconds);
-    return count;
+    try {
+      const count = await this.redis.incr(key);
+      if (count === 1) await this.redis.expire(key, ttlSeconds);
+      return count;
+    } catch (err) {
+      return 0;
+    }
   }
 
   async resetFailures(identifier: string): Promise<void> {
-    await this.redis.del(`backoff:${identifier}`);
+    try {
+      await this.redis.del(`backoff:${identifier}`);
+    } catch (err) {}
   }
 
   async temporaryBan(identifier: string, durationSeconds: number): Promise<void> {
-    await this.redis.set(`ban:${identifier}`, '1', 'EX', durationSeconds);
+    try {
+      await this.redis.set(`ban:${identifier}`, '1', 'EX', durationSeconds);
+    } catch (err) {}
   }
 
   async isBanned(identifier: string): Promise<boolean> {
-    return (await this.redis.exists(`ban:${identifier}`)) === 1;
+    try {
+      return (await this.redis.exists(`ban:${identifier}`)) === 1;
+    } catch (err) {
+      console.error('CRITICAL: Redis error in ban check:', err);
+      // FAIL-CLOSED: Assume banned if we can't check
+      throw new InternalServerErrorException('Security verification service unavailable');
+    }
   }
 }

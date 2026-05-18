@@ -11,6 +11,12 @@ export class AuthDelegationService {
   ) {}
 
   async createPendingGrant(tenantId: string, delegatorUserId: string, agentName: string, actionScope: string, contextMetadata: any) {
+    // P0 — Prohibit wildcard privilege escalation
+    const forbiddenWildcards = ['*', '*:*', '**'];
+    if (forbiddenWildcards.includes(actionScope.trim())) {
+      throw new BadRequestException('Wildcard privilege escalation is prohibited. Provide an explicit scoped action.');
+    }
+
     const agent = await this.prisma.servicePrincipal.findUnique({ where: { name: agentName } });
     if (!agent) throw new NotFoundException(`Agent ${agentName} not found`);
 
@@ -58,23 +64,39 @@ export class AuthDelegationService {
   }
 
   async consumeGrant(agentId: string, grantId: string, actionToken: string) {
-    const grant = await this.prisma.delegationGrant.findFirst({
+    // ━━━ ATOMIC DOUBLE-CONSUME RESISTANCE (Target 5) ━━━
+    const result = await this.prisma.delegationGrant.updateMany({
       where: {
         id: grantId,
         agentId,
         actionToken,
         status: 'approved',
+        expiresAt: { gte: new Date() },
+      },
+      data: {
+        status: 'consumed',
+      },
+    });
+
+    if (result.count === 0) {
+      // Re-audit to check reason for failure
+      const existing = await this.prisma.delegationGrant.findUnique({
+        where: { id: grantId },
+      });
+
+      if (!existing) {
+        throw new UnauthorizedException('Invalid or unauthorized grant');
       }
-    });
-
-    if (!grant) throw new UnauthorizedException('Invalid or unauthorized grant');
-    if (new Date() > grant.expiresAt) throw new UnauthorizedException('Grant has expired');
-
-    // Mark as consumed
-    await this.prisma.delegationGrant.update({
-      where: { id: grantId },
-      data: { status: 'consumed' }
-    });
+      if (existing.status === 'consumed') {
+        throw new UnauthorizedException('Grant already consumed (REPLAY DETECTED)');
+      }
+      if (new Date() > existing.expiresAt) {
+        throw new UnauthorizedException('Grant has expired');
+      }
+      throw new UnauthorizedException(
+        'Invalid action token or unauthorized agent',
+      );
+    }
 
     return { success: true, message: 'Action legally consumed and audited' };
   }

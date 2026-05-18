@@ -45,8 +45,9 @@ export class AuthDelegationController {
     @Body('agentId') agentId: string,
     @Body('secretKey') secretKey: string,
     @Body('grantId') grantId: string,
+    @Body('actionToken') actionToken: string,
   ) {
-    const token = await this.m2mService.issueAgentToken(agentId, secretKey, grantId);
+    const token = await this.m2mService.issueAgentToken(agentId, secretKey, grantId, actionToken);
     return { accessToken: token };
   }
 }

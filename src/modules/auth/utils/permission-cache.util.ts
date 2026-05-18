@@ -19,10 +19,18 @@ export class PermissionCacheUtil {
   }
 
   async setPermissions(userId: string, permissions: string[]): Promise<void> {
-    await this.redis.setex(this.getCacheKey(userId), 300, JSON.stringify(permissions));
+    try {
+      await this.redis.setex(this.getCacheKey(userId), 300, JSON.stringify(permissions));
+    } catch (err) {
+      console.error('Redis error while setting permissions cache:', err);
+    }
   }
 
   async invalidate(userId: string): Promise<void> {
-    await this.redis.del(this.getCacheKey(userId));
+    try {
+      await this.redis.del(this.getCacheKey(userId));
+    } catch (err) {
+      console.error('Redis error while invalidating permissions cache:', err);
+    }
   }
 }

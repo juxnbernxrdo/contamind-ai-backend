@@ -16,6 +16,27 @@ export class PermissionGuard implements CanActivate {
     private readonly permissionCache: PermissionCacheUtil,
   ) {}
 
+  private static match(granted: string, required: string): boolean {
+    if (granted === required) return true;
+
+    // Deterministic hierarchical matching: module:resource:action
+    // Granted can end with :* for explicit narrowing
+    if (granted.endsWith(':*')) {
+      const prefix = granted.slice(0, -2);
+      const prefixParts = prefix.split(':');
+      const requiredParts = required.split(':');
+
+      if (prefixParts.length >= requiredParts.length) return false;
+
+      for (let i = 0; i < prefixParts.length; i++) {
+        if (prefixParts[i] !== requiredParts[i]) return false;
+      }
+      return true;
+    }
+
+    return false;
+  }
+
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const requiredPermission = this.reflector.getAllAndOverride<string>(
       'permission',
@@ -25,50 +46,65 @@ export class PermissionGuard implements CanActivate {
     if (!requiredPermission) return true;
 
     const request = context.switchToHttp().getRequest();
-    const userId: string = request.user?.id;
+    const user = request.user;
 
-    if (!userId) {
-      throw new ForbiddenException('No authenticated user in request');
+    if (!user || !user.id) {
+      throw new ForbiddenException('No authenticated identity in request');
     }
 
-    // ━━━ CACHÉ REDIS ━━━
-    let userPermissions = await this.permissionCache.getPermissions(userId);
+    // ━━━ M2M SCOPE VALIDATION ━━━
+    if (user.type === 'm2m') {
+      const scope = user.actionScope;
+      if (!scope) throw new ForbiddenException('Agent has no action scope');
 
-    // Si no está en caché, consultar DB
-    if (!userPermissions) {
-      const user = await this.prisma.user.findUnique({
-        where: { id: userId },
-        include: {
-          permissions: true,
-        },
-      });
-
-      if (!user) {
-        throw new ForbiddenException('User not found');
+      // Prohibit wildcard privilege escalation (Target 5)
+      if (
+        scope === '*' ||
+        scope === '*:*' ||
+        scope === '**' ||
+        scope.includes('**')
+      ) {
+        throw new ForbiddenException(
+          'Wildcard privilege escalation detected and prohibited',
+        );
       }
 
-      if (user.accountDisabled || user.accountLocked) {
+      if (PermissionGuard.match(scope, requiredPermission)) return true;
+
+      throw new ForbiddenException(
+        `Agent scope "${scope}" does not permit: ${requiredPermission}`,
+      );
+    }
+
+    // ━━━ HUMAN USER PERMISSIONS ━━━
+    const userId = user.id;
+    let userPermissions = await this.permissionCache.getPermissions(userId);
+
+    if (!userPermissions) {
+      const dbUser = await this.prisma.user.findUnique({
+        where: { id: userId },
+        include: { permissions: true },
+      });
+
+      if (!dbUser || dbUser.accountDisabled || dbUser.accountLocked) {
         throw new ForbiddenException('Account is inactive');
       }
 
-      // Extraer permisos directos
-      userPermissions = user.permissions.flatMap((p) => [
-        `${p.module}.${p.action}`,
-        p.module,
-        p.action,
-        `${p.module}:*`, // Wildcard support
-      ]);
-
-      // Guardar en caché por 5 minutos
+      userPermissions = dbUser.permissions.map(
+        (p) => `${p.module}:${p.action}`,
+      );
       await this.permissionCache.setPermissions(userId, userPermissions);
     }
 
-    // ━━━ FIN CACHÉ ━━━
-
-    const hasPermission = userPermissions.includes(requiredPermission);
+    // DENY BY DEFAULT
+    const hasPermission = userPermissions.some((granted) =>
+      PermissionGuard.match(granted, requiredPermission),
+    );
 
     if (!hasPermission) {
-      throw new ForbiddenException(`Missing required permission: ${requiredPermission}`);
+      throw new ForbiddenException(
+        `Missing required permission: ${requiredPermission}`,
+      );
     }
 
     return true;

@@ -1,41 +1,55 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { JwtUtil } from './utils/jwt.util';
+import { PasswordUtil } from './utils/password.util';
 
 @Injectable()
 export class AuthM2MService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtUtil: JwtUtil,
+    private readonly passwordUtil: PasswordUtil,
   ) {}
 
-  async issueAgentToken(agentId: string, secretKey: string, grantId: string): Promise<string> {
-    // In a real scenario, the secretKey would be verified against the Agent's public key or a hashed secret.
-    // For this MVP, we just verify the agent exists and is active.
+  async issueAgentToken(agentId: string, secretKey: string, grantId: string, actionToken: string): Promise<string> {
     const agent = await this.prisma.servicePrincipal.findUnique({ where: { id: agentId } });
     if (!agent || !agent.isActive) {
       throw new UnauthorizedException('Invalid or inactive agent');
     }
 
-    // Verify the grant exists and is approved, and belongs to this agent
-    const grant = await this.prisma.delegationGrant.findUnique({ where: { id: grantId } });
-    if (!grant) {
-      throw new UnauthorizedException('Grant not found');
-    }
-    if (grant.agentId !== agentId) {
-      throw new UnauthorizedException('Grant does not belong to this agent');
-    }
-    if (grant.status !== 'approved' || !grant.actionToken) {
-      throw new UnauthorizedException('Grant is not approved for execution');
-    }
-    if (new Date() > grant.expiresAt) {
-      throw new UnauthorizedException('Grant has expired');
+    // MANDATORY: Verify secretKey against hashedSecret
+    if (!agent.hashedSecret) {
+      throw new UnauthorizedException('Agent secret not configured');
     }
 
-    // Issue a short-lived JWT (e.g., 5 minutes) specifically for M2M context
+    const isSecretValid = await this.passwordUtil.compare(secretKey, agent.hashedSecret);
+    if (!isSecretValid) {
+      throw new UnauthorizedException('Invalid agent credentials');
+    }
+
+    // ATOMIC: Verify and consume the grant in one go to prevent race conditions (P0 REQUIREMENT)
+    const updatedGrant = await this.prisma.delegationGrant.updateMany({
+      where: { 
+        id: grantId, 
+        agentId: agentId,
+        actionToken: actionToken, // Cryptographic HITL validation
+        status: 'approved',
+        expiresAt: { gt: new Date() }
+      },
+      data: { status: 'consumed', updatedAt: new Date() }
+    });
+
+    if (updatedGrant.count === 0) {
+      throw new UnauthorizedException('Grant is not valid, already consumed, or expired');
+    }
+
+    // Since we updated it, we can now fetch the full grant details safely
+    const grant = await this.prisma.delegationGrant.findUniqueOrThrow({ where: { id: grantId } });
+
     const payload = {
       sub: agentId,
       type: 'm2m',
+      sv: agent.securityVersion,
       grantId: grant.id,
       tenantId: grant.tenantId,
       delegatorId: grant.delegatorUserId,
@@ -43,9 +57,6 @@ export class AuthM2MService {
       actionScope: grant.actionScope,
     };
 
-    // Assuming jwtUtil can sign an arbitrary payload. We might need a specific M2M secret, but using the default for now.
-    // Actually, let's use the JwtService from nestjs/jwt if jwtUtil doesn't support custom exp.
-    // We'll see how jwtUtil is implemented. For now, generateAccessToken sets it to 15m.
     return this.jwtUtil.generateAccessToken(payload);
   }
 }
